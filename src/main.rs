@@ -2,10 +2,15 @@ use eframe::egui::{
     self, vec2, Color32, CornerRadius, DragValue, Frame, Label, Margin, RichText, ScrollArea,
     Stroke, TextEdit,
 };
-use serde::Deserialize;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
-const TALENTS_JSON: &str = include_str!("../assets/talents.json");
+const TALENTS_WIKI_URL: &str = "https://deepwoken.co/wiki/talent";
+const TALENTS_CACHE_PATH: &str = "talents_wiki_cache.json";
 const BASE_STATS: [&str; 6] = [
     "Strength",
     "Fortitude",
@@ -42,7 +47,7 @@ impl TalentCategory {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 struct StatBlock {
     base: [u8; 6],
     weapon: [u8; 3],
@@ -63,7 +68,7 @@ impl StatBlock {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Talent {
     key: String,
     name: String,
@@ -235,29 +240,6 @@ impl BuildOptimizer {
     }
 }
 
-#[derive(Deserialize)]
-struct TalentJson {
-    name: String,
-    #[serde(default = "default_rarity")]
-    rarity: String,
-    #[serde(default)]
-    reqs: TalentReqsJson,
-}
-
-#[derive(Default, Deserialize)]
-struct TalentReqsJson {
-    #[serde(default)]
-    base: BTreeMap<String, u8>,
-    #[serde(default)]
-    weapon: BTreeMap<String, u8>,
-    #[serde(default)]
-    attunement: BTreeMap<String, u8>,
-}
-
-fn default_rarity() -> String {
-    "Common".to_owned()
-}
-
 struct DeepwokenApp {
     talents: Vec<Talent>,
     selected_index: Option<usize>,
@@ -277,14 +259,14 @@ struct DeepwokenApp {
 
 impl DeepwokenApp {
     fn new() -> Self {
-        match load_talents() {
-            Ok(talents) => Self {
+        match load_startup_talents() {
+            Ok((talents, status)) => Self {
                 talents,
                 selected_index: None,
                 selected_talents: Vec::new(),
                 selected_selected_index: None,
                 search: String::new(),
-                status: "Loaded bundled talent data.".to_owned(),
+                status,
                 active_tab: ActiveTab::Talents,
                 pre_stats: StatBlock::default(),
                 post_stats: StatBlock::default(),
@@ -959,34 +941,196 @@ fn append_requirement_search_tokens<const N: usize>(
     }
 }
 
-fn load_talents() -> Result<Vec<Talent>, String> {
-    let parsed: BTreeMap<String, TalentJson> =
-        serde_json::from_str(TALENTS_JSON).map_err(|error| error.to_string())?;
-
-    let mut talents: Vec<_> = parsed
-        .into_iter()
-        .map(|(key, value)| Talent {
-            key,
-            name: value.name,
-            rarity: value.rarity,
-            stats: StatBlock {
-                base: map_stats(&value.reqs.base, &BASE_STATS),
-                weapon: map_stats(&value.reqs.weapon, &WEAPON_STATS),
-                attunement: map_stats(&value.reqs.attunement, &ATTUNEMENT_STATS),
-            },
-        })
-        .collect();
-
-    talents.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(talents)
+fn assign_chip_requirement(stats: &mut StatBlock, label: &str, value: u8) {
+    match label {
+        "Strength" => stats.base[0] = stats.base[0].max(value),
+        "Fortitude" => stats.base[1] = stats.base[1].max(value),
+        "Agility" => stats.base[2] = stats.base[2].max(value),
+        "Intelligence" => stats.base[3] = stats.base[3].max(value),
+        "Willpower" => stats.base[4] = stats.base[4].max(value),
+        "Charisma" => stats.base[5] = stats.base[5].max(value),
+        "Heavy Weapon" | "Heavy Wep." => stats.weapon[0] = stats.weapon[0].max(value),
+        "Medium Weapon" | "Medium Wep." => stats.weapon[1] = stats.weapon[1].max(value),
+        "Light Weapon" | "Light Wep." => stats.weapon[2] = stats.weapon[2].max(value),
+        "Flamecharm" => stats.attunement[0] = stats.attunement[0].max(value),
+        "Frostdraw" => stats.attunement[1] = stats.attunement[1].max(value),
+        "Thundercall" => stats.attunement[2] = stats.attunement[2].max(value),
+        "Galebreathe" => stats.attunement[3] = stats.attunement[3].max(value),
+        "Shadowcast" => stats.attunement[4] = stats.attunement[4].max(value),
+        "Ironsing" => stats.attunement[5] = stats.attunement[5].max(value),
+        "Bloodrend" | "Bloodrender" => stats.attunement[6] = stats.attunement[6].max(value),
+        _ => {}
+    }
 }
 
-fn map_stats<const N: usize>(source: &BTreeMap<String, u8>, names: &[&str; N]) -> [u8; N] {
-    let mut stats = [0; N];
-    for (index, name) in names.iter().enumerate() {
-        stats[index] = source.get(*name).copied().unwrap_or(0);
+fn load_startup_talents() -> Result<(Vec<Talent>, String), String> {
+    match refresh_talents_cache() {
+        Ok(()) => {
+            let contents = fs::read_to_string(TALENTS_CACHE_PATH).map_err(|error| error.to_string())?;
+            let talents = parse_talent_cache(&contents)?;
+            Ok((talents, "Refreshed talents from wiki.".to_owned()))
+        }
+        Err(fetch_error) => {
+            if Path::new(TALENTS_CACHE_PATH).exists() {
+                let contents =
+                    fs::read_to_string(TALENTS_CACHE_PATH).map_err(|error| error.to_string())?;
+                let talents = parse_talent_cache(&contents)?;
+                Ok((talents, format!("Using cached wiki talents. Refresh failed: {fetch_error}")))
+            } else {
+                Err(format!("Failed to load talents from wiki and no cache exists: {fetch_error}"))
+            }
+        }
     }
-    stats
+}
+
+fn refresh_talents_cache() -> Result<(), String> {
+    if Path::new(TALENTS_CACHE_PATH).exists() {
+        fs::remove_file(TALENTS_CACHE_PATH).map_err(|error| error.to_string())?;
+    }
+
+    let client = Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        )
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let talents = fetch_all_wiki_talents(&client)?;
+    let cache = serde_json::to_string(&talents).map_err(|error| error.to_string())?;
+    fs::write(TALENTS_CACHE_PATH, cache).map_err(|error| error.to_string())
+}
+
+fn fetch_all_wiki_talents(client: &Client) -> Result<Vec<Talent>, String> {
+    let response = client
+        .get(TALENTS_WIKI_URL)
+        .header("Referer", "https://deepwoken.co/talents")
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| error.to_string())?;
+    let body = response.text().map_err(|error| error.to_string())?;
+    parse_talents_from_wiki_html(&body)
+}
+
+fn parse_talent_cache(json: &str) -> Result<Vec<Talent>, String> {
+    let talents: Vec<Talent> = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    Ok(dedup_and_sort_talents(talents))
+}
+
+fn parse_talents_from_wiki_html(html: &str) -> Result<Vec<Talent>, String> {
+    let payload = extract_nuxt_payload(html)?;
+    let root: Vec<Value> = serde_json::from_str(payload).map_err(|error| error.to_string())?;
+    let state = root
+        .get(3)
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Nuxt payload missing talent state object.".to_owned())?;
+    let list_ref = state
+        .get("wiki-list-talent")
+        .and_then(nuxt_ref_index)
+        .ok_or_else(|| "Nuxt payload missing wiki-list-talent reference.".to_owned())?;
+    let list = root
+        .get(list_ref)
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Nuxt talent list reference did not resolve to an array.".to_owned())?;
+
+    let mut talents = Vec::new();
+    for entry_ref in list {
+        let Some(entry_index) = nuxt_ref_index(entry_ref) else {
+            continue;
+        };
+        let Some(entry) = root.get(entry_index).and_then(Value::as_object) else {
+            continue;
+        };
+
+        let Some(name) = entry.get("name").and_then(|value| nuxt_string(&root, value)) else {
+            continue;
+        };
+        let rarity = entry
+            .get("rarity")
+            .and_then(|value| nuxt_string(&root, value))
+            .unwrap_or_else(|| "Common".to_owned());
+        let key = name.to_lowercase();
+
+        let mut stats = StatBlock::default();
+        if let Some(requirements) = entry.get("requirements").and_then(|value| nuxt_object(&root, value))
+            && let Some(stat_map) = requirements.get("stats").and_then(|value| nuxt_object(&root, value))
+        {
+            for (label, raw_value) in stat_map {
+                if let Some(value) = nuxt_u8(&root, raw_value) {
+                    assign_chip_requirement(&mut stats, label, value);
+                }
+            }
+        }
+
+        talents.push(Talent {
+            key,
+            name,
+            rarity,
+            stats,
+        });
+    }
+
+    Ok(dedup_and_sort_talents(talents))
+}
+
+fn extract_nuxt_payload(html: &str) -> Result<&str, String> {
+    let start_marker = "<script type=\"application/json\" data-nuxt-data=\"nuxt-app\" data-ssr=\"true\" id=\"__NUXT_DATA__\">";
+    let start = html
+        .find(start_marker)
+        .ok_or_else(|| "Could not find __NUXT_DATA__ script.".to_owned())?;
+    let content_start = start + start_marker.len();
+    let end = html[content_start..]
+        .find("</script>")
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| "Could not find end of __NUXT_DATA__ script.".to_owned())?;
+    Ok(&html[content_start..end])
+}
+
+fn nuxt_ref_index(value: &Value) -> Option<usize> {
+    value.as_u64().map(|value| value as usize)
+}
+
+fn nuxt_deref<'a>(root: &'a [Value], value: &'a Value) -> Option<&'a Value> {
+    let index = nuxt_ref_index(value)?;
+    root.get(index)
+}
+
+fn nuxt_string(root: &[Value], value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    nuxt_deref(root, value)?.as_str().map(str::to_owned)
+}
+
+fn nuxt_object<'a>(root: &'a [Value], value: &'a Value) -> Option<&'a Map<String, Value>> {
+    if let Some(object) = value.as_object() {
+        return Some(object);
+    }
+    nuxt_deref(root, value)?.as_object()
+}
+
+fn nuxt_u8(root: &[Value], value: &Value) -> Option<u8> {
+    if let Some(number) = value.as_u64() {
+        if let Some(resolved) = root.get(number as usize) {
+            return resolved
+                .as_u64()
+                .and_then(|resolved_number| u8::try_from(resolved_number).ok())
+                .or_else(|| u8::try_from(number).ok());
+        }
+        return u8::try_from(number).ok();
+    }
+    None
+}
+
+fn dedup_and_sort_talents(talents: Vec<Talent>) -> Vec<Talent> {
+    let mut by_key = BTreeMap::new();
+    for talent in talents {
+        by_key.insert(talent.key.clone(), talent);
+    }
+
+    let mut deduped: Vec<_> = by_key.into_values().collect();
+    deduped.sort_by(|left, right| left.name.cmp(&right.name));
+    deduped
 }
 
 fn max_assign<const N: usize>(target: &mut [u8; N], source: &[u8; N]) {
