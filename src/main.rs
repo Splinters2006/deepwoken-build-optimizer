@@ -568,10 +568,6 @@ impl DeepwokenApp {
     fn render_output_tab(&mut self, ui: &mut egui::Ui) {
         section_frame().show(ui, |ui| {
             section_header(ui, "Optimization Output", "Run the solver and inspect the resulting plan.");
-            if action_button(ui, "Calculate Build", Color32::from_rgb(151, 88, 58)).clicked() {
-                self.optimize();
-            }
-            ui.add_space(12.0);
             ScrollArea::vertical().show(ui, |ui| {
                 ui.add(
                     TextEdit::multiline(&mut self.output)
@@ -640,6 +636,7 @@ impl eframe::App for DeepwokenApp {
 }
 
 fn draw_stat_editor(ui: &mut egui::Ui, stats: &mut StatBlock, mins: &StatBlock, is_pre: bool) {
+    let panel_id = if is_pre { "pre" } else { "post" };
     ui.label(
         RichText::new("Blue values are talent-driven minimums.")
             .color(Color32::from_rgb(133, 186, 220)),
@@ -647,16 +644,33 @@ fn draw_stat_editor(ui: &mut egui::Ui, stats: &mut StatBlock, mins: &StatBlock, 
     ui.add_space(10.0);
 
     inset_frame().show(ui, |ui| {
-        draw_stat_group(ui, "Base Stats", &BASE_STATS, &mut stats.base, &mins.base, is_pre);
-    });
-    ui.add_space(10.0);
-    inset_frame().show(ui, |ui| {
-        draw_stat_group(ui, "Weapon Stats", &WEAPON_STATS, &mut stats.weapon, &mins.weapon, is_pre);
+        draw_stat_group(
+            ui,
+            &format!("{panel_id}_base_stats"),
+            "Base Stats",
+            &BASE_STATS,
+            &mut stats.base,
+            &mins.base,
+            is_pre,
+        );
     });
     ui.add_space(10.0);
     inset_frame().show(ui, |ui| {
         draw_stat_group(
             ui,
+            &format!("{panel_id}_weapon_stats"),
+            "Weapon Stats",
+            &WEAPON_STATS,
+            &mut stats.weapon,
+            &mins.weapon,
+            is_pre,
+        );
+    });
+    ui.add_space(10.0);
+    inset_frame().show(ui, |ui| {
+        draw_stat_group(
+            ui,
+            &format!("{panel_id}_attunement_stats"),
             "Attunement Stats",
             &ATTUNEMENT_STATS,
             &mut stats.attunement,
@@ -668,6 +682,7 @@ fn draw_stat_editor(ui: &mut egui::Ui, stats: &mut StatBlock, mins: &StatBlock, 
 
 fn draw_stat_group<const N: usize>(
     ui: &mut egui::Ui,
+    grid_id: &str,
     title: &str,
     labels: &[&str; N],
     values: &mut [u8; N],
@@ -676,12 +691,12 @@ fn draw_stat_group<const N: usize>(
 ) {
     ui.label(RichText::new(title).strong().size(17.0));
     ui.add_space(8.0);
-    egui::Grid::new(title)
+    egui::Grid::new(grid_id)
         .num_columns(3)
-        .spacing(vec2(16.0, 10.0))
+        .spacing(vec2(18.0, 12.0))
         .show(ui, |ui| {
         for ((label, value), min) in labels.iter().zip(values.iter_mut()).zip(mins.iter()) {
-            ui.label(RichText::new(*label).color(Color32::from_rgb(234, 232, 228)));
+            ui.label(RichText::new(*label).color(Color32::from_rgb(234, 232, 228)).size(15.0));
             let mut display = *value;
             ui.add(
                 DragValue::new(&mut display)
@@ -692,10 +707,15 @@ fn draw_stat_group<const N: usize>(
             );
             *value = display.max(*min);
 
-            let hint = if !is_pre && *min > 0 { "derived" } else { "floor" };
-            ui.label(
-                RichText::new(format!("Min: {min} {hint}")).color(Color32::from_rgb(133, 186, 220)),
-            );
+            if *min > 0 {
+                let hint = if !is_pre { "from talents/shrine" } else { "from talents" };
+                ui.label(
+                    RichText::new(format!("minimum {min} ({hint})"))
+                        .color(Color32::from_rgb(133, 186, 220)),
+                );
+            } else {
+                ui.label(RichText::new("optional").color(Color32::from_rgb(128, 128, 134)));
+            }
             ui.end_row();
         }
         });
