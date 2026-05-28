@@ -1,0 +1,30 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepwoken-build-optimizer-windows
+          path: target/release/deepwoken-build-optimizer.exe
