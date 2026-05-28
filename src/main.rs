@@ -1,6 +1,6 @@
 use eframe::egui::{
-    self, vec2, Color32, CornerRadius, DragValue, Frame, Margin, RichText, ScrollArea, Stroke,
-    TextEdit,
+    self, vec2, Color32, CornerRadius, DragValue, Frame, Label, Margin, RichText, ScrollArea,
+    Stroke, TextEdit,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -73,12 +73,17 @@ struct Talent {
 
 impl Talent {
     fn search_blob(&self) -> String {
-        format!(
-            "{} {} {}",
+        let mut tokens = vec![
             self.name.to_lowercase(),
             self.key.to_lowercase(),
-            self.rarity.to_lowercase()
-        )
+            self.rarity.to_lowercase(),
+        ];
+
+        append_requirement_search_tokens(&mut tokens, &BASE_STATS, &self.stats.base);
+        append_requirement_search_tokens(&mut tokens, &WEAPON_STATS, &self.stats.weapon);
+        append_requirement_search_tokens(&mut tokens, &ATTUNEMENT_STATS, &self.stats.attunement);
+
+        tokens.join(" ")
     }
 
     fn requirement_lines(&self) -> Vec<String> {
@@ -372,6 +377,8 @@ impl DeepwokenApp {
         }
 
         apply_derived_post_requirements(&mut self.min_post, &self.min_pre);
+        self.pre_stats = StatBlock::default();
+        self.post_stats = StatBlock::default();
         clamp_to_minimums(&mut self.pre_stats, &self.min_pre);
         clamp_to_minimums(&mut self.post_stats, &self.min_post);
     }
@@ -850,10 +857,25 @@ fn talent_row(ui: &mut egui::Ui, selected: bool, name: &str, rarity: &str, on_cl
     let rect = response.rect.shrink2(vec2(12.0, 8.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(name).strong().size(15.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(rarity).color(Color32::from_rgb(196, 171, 127)));
-            });
+            let rarity_width = 92.0;
+            let name_width = (ui.available_width() - rarity_width).max(60.0);
+            ui.add_sized(
+                [name_width, 22.0],
+                Label::new(RichText::new(name).strong().size(15.0))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add_space(8.0);
+            ui.add_sized(
+                [rarity_width - 8.0, 22.0],
+                Label::new(
+                    RichText::new(rarity)
+                        .color(Color32::from_rgb(196, 171, 127))
+                        .strong(),
+                )
+                .truncate()
+                .selectable(false),
+            );
         });
     });
 }
@@ -887,15 +909,31 @@ fn selected_talent_row(
     let rect = response.rect.shrink2(vec2(12.0, 8.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal(|ui| {
+            let category_width = 52.0;
+            let rarity_width = 92.0;
+            let name_width = (ui.available_width() - category_width - rarity_width).max(60.0);
             ui.label(
                 RichText::new(format!("[{}]", talent.category.label()))
                     .strong()
                     .color(tint),
             );
-            ui.label(RichText::new(&talent.talent.name).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(&talent.talent.rarity).color(Color32::from_rgb(196, 171, 127)));
-            });
+            ui.add_sized(
+                [name_width, 22.0],
+                Label::new(RichText::new(&talent.talent.name).strong())
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add_space(8.0);
+            ui.add_sized(
+                [rarity_width, 22.0],
+                Label::new(
+                    RichText::new(&talent.talent.rarity)
+                        .color(Color32::from_rgb(196, 171, 127))
+                        .strong(),
+                )
+                .truncate()
+                .selectable(false),
+            );
         });
     });
 }
@@ -904,6 +942,19 @@ fn collect_stat_lines<const N: usize>(lines: &mut Vec<String>, names: &[&str; N]
     for (name, value) in names.iter().zip(values.iter()) {
         if *value > 0 {
             lines.push(format!("{name}: {value}"));
+        }
+    }
+}
+
+fn append_requirement_search_tokens<const N: usize>(
+    tokens: &mut Vec<String>,
+    names: &[&str; N],
+    values: &[u8; N],
+) {
+    for (name, value) in names.iter().zip(values.iter()) {
+        if *value > 0 {
+            tokens.push(name.to_lowercase());
+            tokens.push(format!("{} {}", name.to_lowercase(), value));
         }
     }
 }
