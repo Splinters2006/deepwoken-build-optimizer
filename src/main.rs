@@ -47,7 +47,7 @@ impl TalentCategory {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 struct StatBlock {
     base: [u8; 6],
     weapon: [u8; 3],
@@ -74,28 +74,47 @@ struct Talent {
     name: String,
     rarity: String,
     stats: StatBlock,
+    #[serde(default)]
+    requirement_notes: Vec<String>,
+    #[serde(default)]
+    variant_label: Option<String>,
 }
 
 impl Talent {
+    fn display_name(&self) -> String {
+        match &self.variant_label {
+            Some(label) => format!("{} ({label})", self.name),
+            None => self.name.clone(),
+        }
+    }
+
     fn search_blob(&self) -> String {
         let mut tokens = vec![
             self.name.to_lowercase(),
             self.key.to_lowercase(),
             self.rarity.to_lowercase(),
         ];
+        if let Some(label) = &self.variant_label {
+            tokens.push(label.to_lowercase());
+        }
 
         append_requirement_search_tokens(&mut tokens, &BASE_STATS, &self.stats.base);
         append_requirement_search_tokens(&mut tokens, &WEAPON_STATS, &self.stats.weapon);
         append_requirement_search_tokens(&mut tokens, &ATTUNEMENT_STATS, &self.stats.attunement);
+        tokens.extend(self.requirement_notes.iter().map(|line| line.to_lowercase()));
 
         tokens.join(" ")
     }
 
     fn requirement_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        collect_stat_lines(&mut lines, &BASE_STATS, &self.stats.base);
-        collect_stat_lines(&mut lines, &WEAPON_STATS, &self.stats.weapon);
-        collect_stat_lines(&mut lines, &ATTUNEMENT_STATS, &self.stats.attunement);
+        if !self.requirement_notes.is_empty() {
+            lines.extend(self.requirement_notes.clone());
+        } else {
+            collect_stat_lines(&mut lines, &BASE_STATS, &self.stats.base);
+            collect_stat_lines(&mut lines, &WEAPON_STATS, &self.stats.weapon);
+            collect_stat_lines(&mut lines, &ATTUNEMENT_STATS, &self.stats.attunement);
+        }
         if lines.is_empty() {
             lines.push("No stat requirements".to_owned());
         }
@@ -202,30 +221,30 @@ impl BuildOptimizer {
                 continue;
             }
 
-            optimize_zero_to_positive_stats(&mut current_pre, &current_post);
+            for pre_variant in zero_to_positive_variants(&current_pre, &current_post) {
+                let Some((shrine_stats, shrine_points_spare)) = shrine_of_order(&pre_variant) else {
+                    continue;
+                };
 
-            let Some((shrine_stats, shrine_points_spare)) = shrine_of_order(&current_pre) else {
-                continue;
-            };
+                let points_needed = points_needed_for_post(&shrine_stats, &current_post);
+                if points_needed > shrine_points_spare {
+                    continue;
+                }
 
-            let points_needed = points_needed_for_post(&shrine_stats, &current_post);
-            if points_needed > shrine_points_spare {
-                continue;
-            }
+                let final_stats = apply_post_requirements(&shrine_stats, &current_post);
+                let points_spare = shrine_points_spare - points_needed;
+                let result = OptimizationResult {
+                    points_spare,
+                    output: format_result(pre_variant, current_post, shrine_stats, final_stats, points_spare),
+                };
 
-            let final_stats = apply_post_requirements(&shrine_stats, &current_post);
-            let points_spare = shrine_points_spare - points_needed;
-            let result = OptimizationResult {
-                points_spare,
-                output: format_result(current_pre, current_post, shrine_stats, final_stats, points_spare),
-            };
-
-            let replace = best
-                .as_ref()
-                .map(|current| result.points_spare > current.points_spare)
-                .unwrap_or(true);
-            if replace {
-                best = Some(result);
+                let replace = best
+                    .as_ref()
+                    .map(|current| result.points_spare > current.points_spare)
+                    .unwrap_or(true);
+                if replace {
+                    best = Some(result);
+                }
             }
         }
 
@@ -370,7 +389,7 @@ impl DeepwokenApp {
             .selected_talents
             .iter()
             .map(|selected| OwnedTalentPrereq {
-                name: selected.talent.name.clone(),
+                name: selected.talent.display_name(),
                 stats: selected.talent.stats,
                 category: selected.category,
             })
@@ -455,7 +474,7 @@ impl DeepwokenApp {
                             for index in filtered {
                                 let talent = &self.talents[index];
                                 let selected = self.selected_index == Some(index);
-                                talent_row(ui, selected, &talent.name, &talent.rarity, || {
+                                talent_row(ui, selected, &talent.display_name(), &talent.rarity, || {
                                     self.selected_index = Some(index);
                                 });
                             }
@@ -478,7 +497,7 @@ impl DeepwokenApp {
                         let talent = &self.talents[index];
                         ui.add_space(12.0);
                         inset_frame().show(ui, |ui| {
-                            ui.label(RichText::new(&talent.name).size(20.0).strong());
+                            ui.label(RichText::new(talent.display_name()).size(20.0).strong());
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {
                                 meta_pill(ui, format!("Key: {}", talent.key));
@@ -901,7 +920,7 @@ fn selected_talent_row(
             );
             ui.add_sized(
                 [name_width, 22.0],
-                Label::new(RichText::new(&talent.talent.name).strong())
+                Label::new(RichText::new(talent.talent.display_name()).strong())
                     .truncate()
                     .selectable(false),
             );
@@ -949,6 +968,7 @@ fn assign_chip_requirement(stats: &mut StatBlock, label: &str, value: u8) {
         "Intelligence" => stats.base[3] = stats.base[3].max(value),
         "Willpower" => stats.base[4] = stats.base[4].max(value),
         "Charisma" => stats.base[5] = stats.base[5].max(value),
+        "Weapon" | "Mind" | "Body" | "Attunement" => {}
         "Heavy Weapon" | "Heavy Wep." => stats.weapon[0] = stats.weapon[0].max(value),
         "Medium Weapon" | "Medium Wep." => stats.weapon[1] = stats.weapon[1].max(value),
         "Light Weapon" | "Light Wep." => stats.weapon[2] = stats.weapon[2].max(value),
@@ -1049,25 +1069,46 @@ fn parse_talents_from_wiki_html(html: &str) -> Result<Vec<Talent>, String> {
             .get("rarity")
             .and_then(|value| nuxt_string(&root, value))
             .unwrap_or_else(|| "Common".to_owned());
-        let key = name.to_lowercase();
 
-        let mut stats = StatBlock::default();
-        if let Some(requirements) = entry.get("requirements").and_then(|value| nuxt_object(&root, value))
-            && let Some(stat_map) = requirements.get("stats").and_then(|value| nuxt_object(&root, value))
-        {
-            for (label, raw_value) in stat_map {
-                if let Some(value) = nuxt_u8(&root, raw_value) {
-                    assign_chip_requirement(&mut stats, label, value);
-                }
-            }
+        if entry.get("VOI").and_then(|value| nuxt_bool(&root, value)).unwrap_or(false) {
+            continue;
         }
 
-        talents.push(Talent {
-            key,
-            name,
-            rarity,
-            stats,
-        });
+        let key = format!("{}::{}", name.to_lowercase(), entry_index);
+
+        if let Some(requirements) = entry.get("requirements").and_then(|value| nuxt_object(&root, value)) {
+            let variants =
+                expand_requirement_variants(&root, requirements, RequirementVariant::default(), false);
+            for variant in variants {
+                let variant_label = if variant.variant_labels.is_empty() {
+                    None
+                } else {
+                    Some(variant.variant_labels.join(" / "))
+                };
+                let variant_key = match &variant_label {
+                    Some(label) => format!("{key}::{label}").to_lowercase(),
+                    None => key.clone(),
+                };
+
+                talents.push(Talent {
+                    key: variant_key,
+                    name: name.clone(),
+                    rarity: rarity.clone(),
+                    stats: variant.stats,
+                    requirement_notes: dedup_strings(variant.requirement_notes),
+                    variant_label,
+                });
+            }
+        } else {
+            talents.push(Talent {
+                key,
+                name,
+                rarity,
+                stats: StatBlock::default(),
+                requirement_notes: Vec::new(),
+                variant_label: None,
+            });
+        }
     }
 
     Ok(dedup_and_sort_talents(talents))
@@ -1109,6 +1150,13 @@ fn nuxt_object<'a>(root: &'a [Value], value: &'a Value) -> Option<&'a Map<String
     nuxt_deref(root, value)?.as_object()
 }
 
+fn nuxt_array<'a>(root: &'a [Value], value: &'a Value) -> Option<&'a Vec<Value>> {
+    if let Some(array) = value.as_array() {
+        return Some(array);
+    }
+    nuxt_deref(root, value)?.as_array()
+}
+
 fn nuxt_u8(root: &[Value], value: &Value) -> Option<u8> {
     if let Some(number) = value.as_u64() {
         if let Some(resolved) = root.get(number as usize) {
@@ -1120,6 +1168,204 @@ fn nuxt_u8(root: &[Value], value: &Value) -> Option<u8> {
         return u8::try_from(number).ok();
     }
     None
+}
+
+fn nuxt_bool(root: &[Value], value: &Value) -> Option<bool> {
+    if let Some(boolean) = value.as_bool() {
+        return Some(boolean);
+    }
+    nuxt_deref(root, value)?.as_bool()
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequirementVariant {
+    stats: StatBlock,
+    requirement_notes: Vec<String>,
+    variant_labels: Vec<String>,
+}
+
+fn expand_requirement_variants(
+    root: &[Value],
+    requirements: &Map<String, Value>,
+    base: RequirementVariant,
+    nested_or: bool,
+) -> Vec<RequirementVariant> {
+    let mut variants = vec![base];
+
+    if let Some(stat_map) = requirements.get("stats").and_then(|value| nuxt_object(root, value)) {
+        for (label, raw_value) in stat_map {
+            if let Some(value) = nuxt_u8(root, raw_value) {
+                if label == "Weapon" {
+                    let mut expanded = Vec::new();
+                    for variant in variants {
+                        for (weapon_label, weapon_index) in
+                            [("Heavy Weapon", 0usize), ("Medium Weapon", 1usize), ("Light Weapon", 2usize)]
+                        {
+                            let mut next = variant.clone();
+                            next.stats.weapon[weapon_index] = next.stats.weapon[weapon_index].max(value);
+                            push_requirement_note(
+                                &mut next.requirement_notes,
+                                nested_or,
+                                format!("{weapon_label}: {value}"),
+                            );
+                            next.variant_labels.push(weapon_label.to_owned());
+                            expanded.push(next);
+                        }
+                    }
+                    variants = expanded;
+                } else if label == "Mind" {
+                    let mut expanded = Vec::new();
+                    for variant in variants {
+                        for (mind_label, base_index) in
+                            [("Intelligence", 3usize), ("Willpower", 4usize), ("Charisma", 5usize)]
+                        {
+                            let mut next = variant.clone();
+                            next.stats.base[base_index] = next.stats.base[base_index].max(value);
+                            push_requirement_note(
+                                &mut next.requirement_notes,
+                                nested_or,
+                                format!("{mind_label}: {value}"),
+                            );
+                            next.variant_labels.push(mind_label.to_owned());
+                            expanded.push(next);
+                        }
+                    }
+                    variants = expanded;
+                } else if label == "Body" {
+                    let mut expanded = Vec::new();
+                    for variant in variants {
+                        for (body_label, base_index) in
+                            [("Strength", 0usize), ("Fortitude", 1usize), ("Agility", 2usize)]
+                        {
+                            let mut next = variant.clone();
+                            next.stats.base[base_index] = next.stats.base[base_index].max(value);
+                            push_requirement_note(
+                                &mut next.requirement_notes,
+                                nested_or,
+                                format!("{body_label}: {value}"),
+                            );
+                            next.variant_labels.push(body_label.to_owned());
+                            expanded.push(next);
+                        }
+                    }
+                    variants = expanded;
+                } else if label == "Attunement" {
+                    let mut expanded = Vec::new();
+                    for variant in variants {
+                        for (att_label, att_index) in [
+                            ("Flamecharm", 0usize),
+                            ("Frostdraw", 1usize),
+                            ("Thundercall", 2usize),
+                            ("Galebreathe", 3usize),
+                            ("Shadowcast", 4usize),
+                            ("Ironsing", 5usize),
+                            ("Bloodrend", 6usize),
+                        ] {
+                            let mut next = variant.clone();
+                            next.stats.attunement[att_index] = next.stats.attunement[att_index].max(value);
+                            push_requirement_note(
+                                &mut next.requirement_notes,
+                                nested_or,
+                                format!("{att_label}: {value}"),
+                            );
+                            next.variant_labels.push(att_label.to_owned());
+                            expanded.push(next);
+                        }
+                    }
+                    variants = expanded;
+                } else {
+                    for variant in &mut variants {
+                        assign_chip_requirement(&mut variant.stats, label, value);
+                        push_requirement_note(
+                            &mut variant.requirement_notes,
+                            nested_or,
+                            format!("{label}: {value}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for key in ["weapon", "equipment", "outfit", "origin", "memento"] {
+        if let Some(text) = requirements.get(key).and_then(|value| nuxt_string(root, value)) {
+            for variant in &mut variants {
+                push_requirement_note(
+                    &mut variant.requirement_notes,
+                    nested_or,
+                    format!("{}: {}", title_case(key), text),
+                );
+            }
+        }
+    }
+
+    for key in ["talents", "mantras", "objectives", "quests"] {
+        if let Some(items) = requirements.get(key).and_then(|value| nuxt_array(root, value)) {
+            let mut resolved = Vec::new();
+            for item in items {
+                if let Some(text) = nuxt_string(root, item) {
+                    resolved.push(text);
+                }
+            }
+            if !resolved.is_empty() {
+                for variant in &mut variants {
+                    push_requirement_note(
+                        &mut variant.requirement_notes,
+                        nested_or,
+                        format!("{}: {}", title_case(key), resolved.join(", ")),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(or_items) = requirements.get("or").and_then(|value| nuxt_array(root, value)) {
+        let current = std::mem::take(&mut variants);
+        let mut expanded = Vec::new();
+        for variant in current {
+            for option in or_items {
+                if let Some(option_requirements) = nuxt_object(root, option) {
+                    expanded.extend(expand_requirement_variants(root, option_requirements, variant.clone(), true));
+                } else if let Some(text) = nuxt_string(root, option) {
+                    let mut next = variant.clone();
+                    push_requirement_note(&mut next.requirement_notes, true, text.clone());
+                    next.variant_labels.push(text);
+                    expanded.push(next);
+                }
+            }
+        }
+        if !expanded.is_empty() {
+            return expanded;
+        }
+    }
+
+    variants
+}
+
+fn push_requirement_note(notes: &mut Vec<String>, nested_or: bool, text: String) {
+    if nested_or {
+        notes.push(format!("OR {text}"));
+    } else {
+        notes.push(text);
+    }
+}
+
+fn title_case(key: &str) -> String {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn dedup_strings(items: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for item in items {
+        if !deduped.contains(&item) {
+            deduped.push(item);
+        }
+    }
+    deduped
 }
 
 fn dedup_and_sort_talents(talents: Vec<Talent>) -> Vec<Talent> {
@@ -1179,21 +1425,75 @@ fn impossible_combination(pre: &StatBlock, post: &StatBlock) -> bool {
     false
 }
 
-fn optimize_zero_to_positive_stats(pre: &mut StatBlock, post: &StatBlock) {
-    for (pre_value, post_value) in pre.base.iter_mut().zip(post.base.iter()) {
+#[derive(Clone, Copy)]
+enum ZeroSlot {
+    Base(usize),
+    Weapon(usize),
+    Attunement(usize),
+}
+
+fn zero_to_positive_variants(pre: &StatBlock, post: &StatBlock) -> Vec<StatBlock> {
+    let mut slots = Vec::new();
+    for (index, (pre_value, post_value)) in pre.base.iter().zip(post.base.iter()).enumerate() {
         if *pre_value == 0 && *post_value > 0 {
-            *pre_value = 1;
+            slots.push(ZeroSlot::Base(index));
         }
     }
-    for (pre_value, post_value) in pre.weapon.iter_mut().zip(post.weapon.iter()) {
+    for (index, (pre_value, post_value)) in pre.weapon.iter().zip(post.weapon.iter()).enumerate() {
         if *pre_value == 0 && *post_value > 0 {
-            *pre_value = 1;
+            slots.push(ZeroSlot::Weapon(index));
         }
     }
-    for (pre_value, post_value) in pre.attunement.iter_mut().zip(post.attunement.iter()) {
+    for (index, (pre_value, post_value)) in pre.attunement.iter().zip(post.attunement.iter()).enumerate() {
         if *pre_value == 0 && *post_value > 0 {
-            *pre_value = 1;
+            slots.push(ZeroSlot::Attunement(index));
         }
+    }
+
+    let mut variants = vec![*pre];
+    for slot in slots {
+        let post_value = read_zero_slot(post, slot);
+        let candidates = candidate_pre_values(post_value);
+        let mut next_variants = Vec::new();
+        for variant in variants {
+            for candidate in &candidates {
+                let mut next = variant;
+                write_zero_slot(&mut next, slot, *candidate);
+                if !next_variants.contains(&next) {
+                    next_variants.push(next);
+                }
+            }
+        }
+        variants = next_variants;
+    }
+
+    variants
+}
+
+fn candidate_pre_values(post_value: u8) -> Vec<u8> {
+    let mut candidates = vec![0];
+    if post_value > 0 && !candidates.contains(&1) {
+        candidates.push(1);
+    }
+    if !candidates.contains(&post_value) {
+        candidates.push(post_value);
+    }
+    candidates
+}
+
+fn read_zero_slot(stats: &StatBlock, slot: ZeroSlot) -> u8 {
+    match slot {
+        ZeroSlot::Base(index) => stats.base[index],
+        ZeroSlot::Weapon(index) => stats.weapon[index],
+        ZeroSlot::Attunement(index) => stats.attunement[index],
+    }
+}
+
+fn write_zero_slot(stats: &mut StatBlock, slot: ZeroSlot, value: u8) {
+    match slot {
+        ZeroSlot::Base(index) => stats.base[index] = value,
+        ZeroSlot::Weapon(index) => stats.weapon[index] = value,
+        ZeroSlot::Attunement(index) => stats.attunement[index] = value,
     }
 }
 
