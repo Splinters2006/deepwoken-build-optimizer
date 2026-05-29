@@ -1281,6 +1281,9 @@ fn expand_requirement_variants(
                             nested_or,
                             format!("{label}: {value}"),
                         );
+                        if nested_or {
+                            variant.variant_labels.push(format!("{label} {value}"));
+                        }
                     }
                 }
             }
@@ -1295,6 +1298,11 @@ fn expand_requirement_variants(
                     nested_or,
                     format!("{}: {}", title_case(key), text),
                 );
+                if nested_or {
+                    variant
+                        .variant_labels
+                        .push(format!("{} {}", title_case(key), text));
+                }
             }
         }
     }
@@ -1314,6 +1322,13 @@ fn expand_requirement_variants(
                         nested_or,
                         format!("{}: {}", title_case(key), resolved.join(", ")),
                     );
+                    if nested_or {
+                        variant.variant_labels.push(format!(
+                            "{} {}",
+                            title_case(key),
+                            resolved.join(", ")
+                        ));
+                    }
                 }
             }
         }
